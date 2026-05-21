@@ -45,10 +45,11 @@ const CONFIG = {
     },
     lowIntent: {
       pipeline: "default",
-      dealStage: "qualifiedtobuy", // or whichever stage suits low-intent nurture
+      dealStage: "qualifiedtobuy",
     },
   },
-  processedIdsFile: path.join(__dirname, "..", "processed-leads.json"),
+  // FIX: removed ".." — file now saves alongside sync.js at repo root
+  processedIdsFile: path.join(__dirname, "processed-leads.json"),
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -302,15 +303,15 @@ async function upsertHighIntentContact(lead, kredoResult) {
   const existingId = await findContactByIdNumber(lead.idNumber);
 
   const properties = {
-    firstname:                lead.firstName        || "",
-    lastname:                 lead.lastName         || "",
-    phone:                    lead.mobileNumber     || "",
-    email:                    lead.email || `${lead.idNumber}@seriti-lead.local`,
+    firstname:               lead.firstName       || "",
+    lastname:                lead.lastName        || "",
+    phone:                   lead.mobileNumber    || "",
+    email:                   lead.email || `${lead.idNumber}@seriti-lead.local`,
     // Custom properties
-    seriti_id_number:         lead.idNumber         || "",
-    seriti_estimated_amount:  lead.estimatedAmount  || "",
-    kredo_approval_chances:   kredoResult.predictedApproval,
-    lead_intent:              "High Intent",
+    seriti_id_number:        lead.idNumber        || "",
+    seriti_estimated_amount: lead.estimatedAmount || "",
+    kredo_approval_chances:  kredoResult.predictedApproval,
+    lead_intent:             "High Intent",
   };
 
   if (existingId) {
@@ -353,10 +354,10 @@ async function createLowIntentContact(lead) {
   }
 
   const properties = {
-    firstname:        lead.firstName    || "",
-    lastname:         lead.lastName     || "",
-    phone:            lead.mobileNumber || "",
-    email:            lead.email || `lo.${(lead.mobileNumber || "unknown").replace(/\D/g,"")}@seriti-lead.local`,
+    firstname:         lead.firstName    || "",
+    lastname:          lead.lastName     || "",
+    phone:             lead.mobileNumber || "",
+    email:             lead.email || `lo.${(lead.mobileNumber || "unknown").replace(/\D/g, "")}@seriti-lead.local`,
     // Custom properties
     seriti_net_income: String(lead.netIncome || ""),
     lead_intent:       "Low Intent",
@@ -418,17 +419,26 @@ async function main() {
   const processedIds = loadProcessedIds();
   log("info", `Loaded ${processedIds.size} cached processed IDs`);
 
-  // Auth: Seriti always needed; Kredo only for high-intent (fetched in parallel)
-  const [seritiToken, kredoToken] = await Promise.all([
-    getSeritiToken(),
-    getKredoToken(),
-  ]);
+  // Auth Seriti first; only fetch Kredo token if there are high-intent leads to process
+  const seritiToken = await getSeritiToken();
 
   // Fetch both lead types in parallel
   const [highLeads, lowLeads] = await Promise.all([
     fetchLeads(seritiToken, "high"),
     fetchLeads(seritiToken, "low"),
   ]);
+
+  // Only auth Kredo if there are unprocessed high-intent leads
+  const unprocessedHigh = highLeads.filter(
+    (lead) => !processedIds.has(highIntentCacheKey(lead))
+  );
+
+  let kredoToken = null;
+  if (unprocessedHigh.length > 0) {
+    kredoToken = await getKredoToken();
+  } else {
+    log("info", "No unprocessed high-intent leads — skipping Kredo auth");
+  }
 
   let successHigh = 0, successLow = 0, errorCount = 0;
 
@@ -438,7 +448,6 @@ async function main() {
   for (const lead of highLeads) {
     const cacheKey = highIntentCacheKey(lead);
 
-    // Fast pre-filter: skip if we cached this ID locally
     if (processedIds.has(cacheKey)) {
       log("info", `Skipping cached high-intent lead: ${lead.idNumber}`);
       continue;
@@ -448,10 +457,8 @@ async function main() {
       const kredoPayload = mapSeritiToKredo(lead);
       const kredoResult  = await postToKredo(kredoToken, kredoPayload);
 
-      // upsertHighIntentContact checks HubSpot by id_number (authoritative dedupe)
       const { contactId, isNew } = await upsertHighIntentContact(lead, kredoResult);
 
-      // Only create a new deal if this is a new contact
       if (isNew) await createDeal(lead, contactId, "high", kredoResult);
 
       processedIds.add(cacheKey);
@@ -469,15 +476,12 @@ async function main() {
   for (const lead of lowLeads) {
     const cacheKey = lowIntentCacheKey(lead);
 
-    // Fast pre-filter: skip if we cached this combo locally
     if (processedIds.has(cacheKey)) {
       log("info", `Skipping cached low-intent lead: ${lead.firstName} ${lead.lastName}`);
       continue;
     }
 
     try {
-      // createLowIntentContact checks HubSpot by name+phone (authoritative dedupe)
-      // Returns null if duplicate — skip silently
       const contactId = await createLowIntentContact(lead);
 
       if (contactId) {
@@ -486,8 +490,7 @@ async function main() {
         log("info", `✓ Low-intent lead processed: ${lead.firstName} ${lead.lastName}`);
       }
 
-      // Cache the key regardless — if it was a duplicate we still don't need
-      // to hit HubSpot again for this combo next run
+      // Cache regardless — duplicate or not, no need to hit HubSpot again next run
       processedIds.add(cacheKey);
     } catch (err) {
       errorCount++;
