@@ -1,0 +1,49 @@
+name: Lead Sync - Seriti → Kredo → HubSpot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # Every 5 minutes
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+
+jobs:
+  sync-leads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4 # Safety: kill before next run starts
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: package.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lead sync
+        env:
+          SERITI_API_KEY: ${{ secrets.SERITI_API_KEY }}
+          SERITI_API_SECRET: ${{ secrets.SERITI_API_SECRET }}
+          SERITI_DEALERSHIP_ID: ${{ secrets.SERITI_DEALERSHIP_ID }}
+          KREDO_USERNAME: ${{ secrets.KREDO_USERNAME }}
+          KREDO_PASSWORD: ${{ secrets.KREDO_PASSWORD }}
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+        run: node src/sync.js
+
+      - name: Upload processed IDs cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: processed-leads.json
+          key: processed-leads-${{ github.run_id }}
+
+      - name: Restore processed IDs cache
+        uses: actions/cache/restore@v4
+        with:
+          path: processed-leads.json
+          key: processed-leads-
+          restore-keys: processed-leads-

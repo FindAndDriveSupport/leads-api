@@ -1,0 +1,15 @@
+{
+  "name": "seriti-kredo-hubspot-sync",
+  "version": "1.0.0",
+  "description": "Syncs high-intent leads from Seriti API → Kredo credit check → HubSpot CRM",
+  "type": "module",
+  "main": "src/sync.js",
+  "scripts": {
+    "start": "node src/sync.js",
+    "test": "node --experimental-vm-modules src/sync.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}
