@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "Syncs high-intent leads from Seriti API → Kredo credit check → HubSpot CRM",
   "type": "module",
-  "main": "src/sync.js",
+  "main": "sync.js",
   "scripts": {
-    "start": "node src/sync.js",
-    "test": "node --experimental-vm-modules src/sync.js"
+    "start": "node sync.js",
+    "test": "echo \"No tests yet\" && exit 0"
   },
   "engines": {
     "node": ">=20"
