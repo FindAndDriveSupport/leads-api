@@ -80,8 +80,8 @@ async function getSeritiToken() {
       headers: { "Content-Type": "application/json" },
     },
     {
-      apiKey:    SERITI_API_KEY,
-      apiSecret: SERITI_API_SECRET,
+      ApiKeyId:     SERITI_API_KEY,
+      ApiSecret:    SERITI_API_SECRET,
     }
   );
 
