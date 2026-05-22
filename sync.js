@@ -78,7 +78,7 @@ async function fetchSeritiLeads() {
   const credentials = Buffer.from(`${SERITI_API_KEY}:${SERITI_API_SECRET}`).toString("base64");
 
   const leads = await request(
-    `https://api.findndrive.co.za/api/leads?dealershipId=${SERITI_DEALERSHIP_ID}&startDate=${SERITI_START_DATE}&endDate=${endDate}`,
+    `https://seritiapi.findndrive.co.za/api/leads?dealershipId=${SERITI_DEALERSHIP_ID}&startDate=${SERITI_START_DATE}&endDate=${endDate}`,
     {
       method: "GET",
       headers: {
