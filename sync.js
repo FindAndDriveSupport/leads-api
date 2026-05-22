@@ -140,8 +140,8 @@ async function submitToKredo(lead) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${kredoToken}`,
         "x-api-key": KREDO_X_API_KEY,
+        "authorizationToken": kredoToken,
       },
     },
     {
