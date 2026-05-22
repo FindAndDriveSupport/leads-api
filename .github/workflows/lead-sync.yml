@@ -11,14 +11,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: ""  # Explicitly disable npm caching — no package-lock.json in this repo
-
       - name: Restore processed IDs cache
-        id: cache-restore
         continue-on-error: true
         uses: actions/cache/restore@v4
         with:
@@ -33,7 +26,9 @@ jobs:
           KREDO_USERNAME: ${{ secrets.KREDO_USERNAME }}
           KREDO_PASSWORD: ${{ secrets.KREDO_PASSWORD }}
           HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
-        run: node sync.js
+        run: |
+          node --version
+          node sync.js
 
       - name: Save processed IDs cache
         if: always()
