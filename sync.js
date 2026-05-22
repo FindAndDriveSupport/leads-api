@@ -8,6 +8,7 @@ const SERITI_DEALERSHIP_ID = process.env.SERITI_DEALERSHIP_ID;
 const KREDO_USERNAME       = process.env.KREDO_USERNAME;
 const KREDO_PASSWORD       = process.env.KREDO_PASSWORD;
 const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN;
+const KREDO_X_API_KEY       = process.env.KREDO_X_API_KEY;
 
 const PROCESSED_FILE    = "processed-leads.json";
 const SERITI_START_DATE = "2026-05-22";
@@ -140,6 +141,7 @@ async function submitToKredo(lead) {
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${kredoToken}`,
+        "x-api-key": KREDO_X_API_KEY,
       },
     },
     {
@@ -275,6 +277,7 @@ async function main() {
     KREDO_USERNAME,
     KREDO_PASSWORD,
     HUBSPOT_ACCESS_TOKEN,
+    KREDO_X_API_KEY,
   };
   const missing = Object.entries(required)
     .filter(([, v]) => !v)
