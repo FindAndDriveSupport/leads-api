@@ -30,7 +30,6 @@ function saveProcessedIds(ids) {
 }
 
 function makeLeadId(lead, intent) {
-  // Prefix with intent so the same person appearing in both lists is processed twice
   return `${intent}-${lead.idNumber}-${lead.date}`;
 }
 
@@ -70,19 +69,40 @@ async function request(url, options = {}, body = null) {
   });
 }
 
+// ─── Step 0: Authenticate with Seriti ────────────────────────────────────────
+async function getSeritiToken() {
+  console.log("🔑 Authenticating with Seriti...");
+
+  const response = await request(
+    "https://seritiapi.findndrive.co.za/api/Authentication/token",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    },
+    {
+      apiKey:    SERITI_API_KEY,
+      apiSecret: SERITI_API_SECRET,
+    }
+  );
+
+  const token = response.token || response.access_token || response.accessToken;
+  if (!token) throw new Error(`Seriti auth failed — no token in response: ${JSON.stringify(response)}`);
+
+  console.log("✅ Seriti token acquired.");
+  return token;
+}
+
 // ─── Step 1: Fetch leads from Seriti ─────────────────────────────────────────
-async function fetchSeritiLeads(intent) {
+async function fetchSeritiLeads(intent, token) {
   const endDate = todayISO();
   console.log(`📡 Fetching ${intent} leads from Seriti (${SERITI_START_DATE} → ${endDate})...`);
-
-  const credentials = Buffer.from(`${SERITI_API_KEY}:${SERITI_API_SECRET}`).toString("base64");
 
   const leads = await request(
     `https://seritiapi.findndrive.co.za/api/Leads/${intent}/${SERITI_DEALERSHIP_ID}?startDate=${SERITI_START_DATE}&endDate=${endDate}`,
     {
       method: "GET",
       headers: {
-        Authorization: `Basic ${credentials}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
     }
@@ -173,7 +193,6 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
     firstname:                lead.firstName,
     lastname:                 lead.lastName,
     phone:                    lead.mobileNumber,
-    // Seriti fields
     seriti_dealer_name:       lead.dealerName,
     seriti_dealer_code:       lead.dealerCode,
     seriti_lead_date:         lead.date,
@@ -184,14 +203,13 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
     seriti_contact_ability:   lead.contactAbility,
     seriti_id_number:         lead.idNumber,
     seriti_net_income:        lead.netIncome,
-    seriti_intent:            intent, // "highIntent" or "lowIntent"
+    seriti_intent:            intent,
   };
 
-  // Kredo fields — only populated for high intent leads
   if (kredoResult) {
-    properties.kredo_credit_score   = String(kredoResult?.score ?? "");
-    properties.kredo_credit_status  = String(kredoResult?.status ?? "");
-    properties.kredo_affordability  = String(kredoResult?.affordability ?? "");
+    properties.kredo_credit_score  = String(kredoResult?.score ?? "");
+    properties.kredo_credit_status = String(kredoResult?.status ?? "");
+    properties.kredo_affordability = String(kredoResult?.affordability ?? "");
   }
 
   const contact = await request(
@@ -228,7 +246,6 @@ async function processLeads(leads, intent, processedIds, runKredo) {
 
     try {
       let kredoResult = null;
-
       if (runKredo) {
         kredoResult = await submitToKredo(lead);
       }
@@ -267,10 +284,13 @@ async function main() {
 
   const processedIds = loadProcessedIds();
 
+  // Authenticate with Seriti once, reuse token for both requests
+  const seritiToken = await getSeritiToken();
+
   // Fetch both intent lists in parallel
   const [highLeads, lowLeads] = await Promise.all([
-    fetchSeritiLeads("highIntent"),
-    fetchSeritiLeads("lowIntent"),
+    fetchSeritiLeads("highIntent", seritiToken),
+    fetchSeritiLeads("lowIntent", seritiToken),
   ]);
 
   // High intent → Kredo + HubSpot
