@@ -9,8 +9,8 @@ const KREDO_USERNAME       = process.env.KREDO_USERNAME;
 const KREDO_PASSWORD       = process.env.KREDO_PASSWORD;
 const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN;
 
-const PROCESSED_FILE = "processed-leads.json";
-const SERITI_START_DATE = "2026-05-22"; // Fixed start date — fetch all leads from this date onwards
+const PROCESSED_FILE    = "processed-leads.json";
+const SERITI_START_DATE = "2026-05-22";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function loadProcessedIds() {
@@ -29,13 +29,13 @@ function saveProcessedIds(ids) {
   fs.writeFileSync(PROCESSED_FILE, JSON.stringify([...ids]), "utf8");
 }
 
-function makeLeadId(lead) {
-  // Seriti has no explicit ID field — compose one from idNumber + date
-  return `${lead.idNumber}-${lead.date}`;
+function makeLeadId(lead, intent) {
+  // Prefix with intent so the same person appearing in both lists is processed twice
+  return `${intent}-${lead.idNumber}-${lead.date}`;
 }
 
 function todayISO() {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  return new Date().toISOString().slice(0, 10);
 }
 
 async function request(url, options = {}, body = null) {
@@ -71,14 +71,14 @@ async function request(url, options = {}, body = null) {
 }
 
 // ─── Step 1: Fetch leads from Seriti ─────────────────────────────────────────
-async function fetchSeritiLeads() {
+async function fetchSeritiLeads(intent) {
   const endDate = todayISO();
-  console.log(`📡 Fetching leads from Seriti (${SERITI_START_DATE} → ${endDate})...`);
+  console.log(`📡 Fetching ${intent} leads from Seriti (${SERITI_START_DATE} → ${endDate})...`);
 
   const credentials = Buffer.from(`${SERITI_API_KEY}:${SERITI_API_SECRET}`).toString("base64");
 
   const leads = await request(
-    `https://seritiapi.findndrive.co.za/api/leads?dealershipId=${SERITI_DEALERSHIP_ID}&startDate=${SERITI_START_DATE}&endDate=${endDate}`,
+    `https://seritiapi.findndrive.co.za/api/Leads/${intent}/${SERITI_DEALERSHIP_ID}?startDate=${SERITI_START_DATE}&endDate=${endDate}`,
     {
       method: "GET",
       headers: {
@@ -88,15 +88,14 @@ async function fetchSeritiLeads() {
     }
   );
 
-  console.log(`✅ Seriti returned ${leads.length} lead(s).`);
+  console.log(`✅ Seriti returned ${leads.length} ${intent} lead(s).`);
   return leads;
 }
 
-// ─── Step 2: Submit to Kredo for credit check ─────────────────────────────────
+// ─── Step 2: Kredo credit check (high intent only) ───────────────────────────
 async function submitToKredo(lead) {
   console.log(`  🔍 Submitting ${lead.firstName} ${lead.lastName} to Kredo...`);
 
-  // Step 2a: Authenticate with Kredo
   const authResponse = await request(
     "https://api.kredo.co.za/v1/auth/login",
     {
@@ -112,7 +111,6 @@ async function submitToKredo(lead) {
   const kredoToken = authResponse.token || authResponse.access_token;
   if (!kredoToken) throw new Error("Kredo auth failed — no token returned.");
 
-  // Step 2b: Submit credit check
   const kredoResult = await request(
     "https://api.kredo.co.za/v1/credit-check",
     {
@@ -136,10 +134,10 @@ async function submitToKredo(lead) {
 }
 
 // ─── Step 3: Create contact in HubSpot ───────────────────────────────────────
-async function createHubSpotContact(lead, kredoResult) {
-  console.log(`  📬 Creating HubSpot contact for ${lead.firstName} ${lead.lastName}...`);
+async function createHubSpotContact(lead, intent, kredoResult = null) {
+  console.log(`  📬 Creating HubSpot contact for ${lead.firstName} ${lead.lastName} [${intent}]...`);
 
-  // Check if contact already exists by phone (Seriti returns no email)
+  // Check if contact already exists by phone
   const searchResult = await request(
     "https://api.hubapi.com/crm/v3/objects/contacts/search",
     {
@@ -171,6 +169,31 @@ async function createHubSpotContact(lead, kredoResult) {
     return null;
   }
 
+  const properties = {
+    firstname:                lead.firstName,
+    lastname:                 lead.lastName,
+    phone:                    lead.mobileNumber,
+    // Seriti fields
+    seriti_dealer_name:       lead.dealerName,
+    seriti_dealer_code:       lead.dealerCode,
+    seriti_lead_date:         lead.date,
+    seriti_approval_chance:   lead.approvalChance,
+    seriti_estimated_amount:  lead.estimatedAmount,
+    seriti_instalment_budget: lead.instalmentBudget,
+    seriti_insurance_budget:  lead.insuranceBudget,
+    seriti_contact_ability:   lead.contactAbility,
+    seriti_id_number:         lead.idNumber,
+    seriti_net_income:        lead.netIncome,
+    seriti_intent:            intent, // "highIntent" or "lowIntent"
+  };
+
+  // Kredo fields — only populated for high intent leads
+  if (kredoResult) {
+    properties.kredo_credit_score   = String(kredoResult?.score ?? "");
+    properties.kredo_credit_status  = String(kredoResult?.status ?? "");
+    properties.kredo_affordability  = String(kredoResult?.affordability ?? "");
+  }
+
   const contact = await request(
     "https://api.hubapi.com/crm/v3/objects/contacts",
     {
@@ -180,39 +203,52 @@ async function createHubSpotContact(lead, kredoResult) {
         "Content-Type": "application/json",
       },
     },
-    {
-      properties: {
-        firstname:                lead.firstName,
-        lastname:                 lead.lastName,
-        phone:                    lead.mobileNumber,
-        // Seriti fields — create these as custom contact properties in HubSpot
-        seriti_dealer_name:       lead.dealerName,
-        seriti_dealer_code:       lead.dealerCode,
-        seriti_lead_date:         lead.date,
-        seriti_approval_chance:   lead.approvalChance,
-        seriti_estimated_amount:  lead.estimatedAmount,
-        seriti_instalment_budget: lead.instalmentBudget,
-        seriti_insurance_budget:  lead.insuranceBudget,
-        seriti_contact_ability:   lead.contactAbility,
-        seriti_id_number:         lead.idNumber,
-        seriti_net_income:        lead.netIncome,
-        // Kredo fields — create these as custom contact properties in HubSpot
-        kredo_credit_score:       String(kredoResult?.score ?? ""),
-        kredo_credit_status:      String(kredoResult?.status ?? ""),
-        kredo_affordability:      String(kredoResult?.affordability ?? ""),
-      },
-    }
+    { properties }
   );
 
   console.log(`  ✅ HubSpot contact created: ID ${contact.id}`);
   return contact;
 }
 
+// ─── Process a batch of leads ─────────────────────────────────────────────────
+async function processLeads(leads, intent, processedIds, runKredo) {
+  let newCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+
+  for (const lead of leads) {
+    const leadId = makeLeadId(lead, intent);
+
+    if (processedIds.has(leadId)) {
+      skippedCount++;
+      continue;
+    }
+
+    console.log(`\n👤 Processing [${intent}]: ${lead.firstName} ${lead.lastName} (${leadId})`);
+
+    try {
+      let kredoResult = null;
+
+      if (runKredo) {
+        kredoResult = await submitToKredo(lead);
+      }
+
+      await createHubSpotContact(lead, intent, kredoResult);
+      processedIds.add(leadId);
+      newCount++;
+    } catch (err) {
+      console.error(`  ❌ Failed for ${leadId}:`, err.message);
+      errorCount++;
+    }
+  }
+
+  return { newCount, skippedCount, errorCount };
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
   console.log("🚀 Lead sync starting...\n");
 
-  // Validate env vars
   const required = {
     SERITI_API_KEY,
     SERITI_API_SECRET,
@@ -230,37 +266,28 @@ async function main() {
   }
 
   const processedIds = loadProcessedIds();
-  const leads = await fetchSeritiLeads();
 
-  let newCount = 0;
-  let skippedCount = 0;
-  let errorCount = 0;
+  // Fetch both intent lists in parallel
+  const [highLeads, lowLeads] = await Promise.all([
+    fetchSeritiLeads("highIntent"),
+    fetchSeritiLeads("lowIntent"),
+  ]);
 
-  for (const lead of leads) {
-    const leadId = makeLeadId(lead);
+  // High intent → Kredo + HubSpot
+  console.log("\n── High Intent ──────────────────────────────────────────");
+  const high = await processLeads(highLeads, "highIntent", processedIds, true);
 
-    if (processedIds.has(leadId)) {
-      skippedCount++;
-      continue;
-    }
-
-    console.log(`\n👤 Processing: ${lead.firstName} ${lead.lastName} (${leadId})`);
-
-    try {
-      const kredoResult = await submitToKredo(lead);
-      await createHubSpotContact(lead, kredoResult);
-      processedIds.add(leadId);
-      newCount++;
-    } catch (err) {
-      console.error(`  ❌ Failed for ${leadId}:`, err.message);
-      errorCount++;
-      // Don't add to processedIds so it retries next run
-    }
-  }
+  // Low intent → HubSpot only
+  console.log("\n── Low Intent ───────────────────────────────────────────");
+  const low = await processLeads(lowLeads, "lowIntent", processedIds, false);
 
   saveProcessedIds(processedIds);
 
-  console.log(`\n📊 Done. New: ${newCount} | Skipped: ${skippedCount} | Errors: ${errorCount}`);
+  console.log(`
+📊 Summary
+   High intent — New: ${high.newCount} | Skipped: ${high.skippedCount} | Errors: ${high.errorCount}
+   Low intent  — New: ${low.newCount} | Skipped: ${low.skippedCount} | Errors: ${low.errorCount}
+  `);
 }
 
 main().catch((err) => {
