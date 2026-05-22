@@ -26,6 +26,7 @@ jobs:
           KREDO_USERNAME: ${{ secrets.KREDO_USERNAME }}
           KREDO_PASSWORD: ${{ secrets.KREDO_PASSWORD }}
           HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+          KREDO_X_API_KEY: ${{ secrets.KREDO_X_API_KEY }}
         run: |
           node --version
           node sync.js
