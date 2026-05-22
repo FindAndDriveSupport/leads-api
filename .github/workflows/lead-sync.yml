@@ -17,11 +17,12 @@ jobs:
           node-version: "20"
 
       - name: Restore processed IDs cache
+        id: cache-restore
+        continue-on-error: true
         uses: actions/cache/restore@v4
         with:
           path: processed-leads.json
           key: processed-leads-cache
-          restore-keys: processed-leads-cache
 
       - name: Run lead sync
         env:
@@ -35,6 +36,7 @@ jobs:
 
       - name: Save processed IDs cache
         if: always()
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: processed-leads.json
