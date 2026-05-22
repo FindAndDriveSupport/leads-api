@@ -129,7 +129,7 @@ async function submitToKredo(lead) {
     }
   );
 
-  const kredoToken = authResponse.token || authResponse.access_token || authResponse.accessToken || authResponse.data?.token;
+  const kredoToken = authResponse.authorizationToken || authResponse.token || authResponse.access_token || authResponse.accessToken;
   if (!kredoToken) throw new Error(`Kredo auth failed — response: ${JSON.stringify(authResponse)}`);
 
   // Step 2: Credit report — pass token explicitly in Authorization header
