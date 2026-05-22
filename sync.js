@@ -116,6 +116,7 @@ async function fetchSeritiLeads(intent, token) {
 async function submitToKredo(lead) {
   console.log(`  🔍 Submitting ${lead.firstName} ${lead.lastName} to Kredo...`);
 
+  // Step 1: Authenticate — token is inherited by subsequent requests server-side
   const authResponse = await request(
     "https://api.kredo.co.za/private/client/user/auth",
     {
@@ -128,16 +129,17 @@ async function submitToKredo(lead) {
     }
   );
 
-  const kredoToken = authResponse.token || authResponse.access_token;
-  if (!kredoToken) throw new Error("Kredo auth failed — no token returned.");
+  const kredoToken = authResponse.token || authResponse.access_token || authResponse.accessToken || authResponse.data?.token;
+  if (!kredoToken) throw new Error(`Kredo auth failed — response: ${JSON.stringify(authResponse)}`);
 
+  // Step 2: Credit report — pass token explicitly in Authorization header
   const kredoResult = await request(
     "https://api.kredo.co.za/credit-report-json",
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${kredoToken}`,
         "Content-Type": "application/json",
+        "Authorization": `Bearer ${kredoToken}`,
       },
     },
     {
