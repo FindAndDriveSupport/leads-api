@@ -117,7 +117,7 @@ async function submitToKredo(lead) {
   console.log(`  🔍 Submitting ${lead.firstName} ${lead.lastName} to Kredo...`);
 
   const authResponse = await request(
-    "https://api.kredo.co.za/v1/auth/login",
+    "https://api.kredo.co.za/private/client/user/auth",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -132,7 +132,7 @@ async function submitToKredo(lead) {
   if (!kredoToken) throw new Error("Kredo auth failed — no token returned.");
 
   const kredoResult = await request(
-    "https://api.kredo.co.za/v1/credit-check",
+    "https://api.kredo.co.za/credit-report-json",
     {
       method: "POST",
       headers: {
