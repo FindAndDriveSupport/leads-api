@@ -1,510 +1,269 @@
-/**
- * Lead Sync: Seriti API → Kredo API → HubSpot
- *
- * HIGH INTENT flow:
- *   1. Auth Seriti → fetch high-intent leads
- *   2. Deduplicate by id_number in HubSpot
- *   3. Auth Kredo → run credit report → extract PredictedApproval
- *   4. Create/update HubSpot contact (6 fields) + deal tagged "High Intent"
- *
- * LOW INTENT flow:
- *   1. Auth Seriti → fetch low-intent leads
- *   2. Deduplicate by firstName + lastName + mobileNumber in HubSpot
- *   3. Create HubSpot contact (4 fields) + deal tagged "Low Intent"
- *   (No Kredo call for low-intent leads)
- */
-
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import https from "https";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
+const SERITI_API_KEY       = process.env.SERITI_API_KEY;
+const SERITI_API_SECRET    = process.env.SERITI_API_SECRET;
+const SERITI_DEALERSHIP_ID = process.env.SERITI_DEALERSHIP_ID;
+const KREDO_USERNAME       = process.env.KREDO_USERNAME;
+const KREDO_PASSWORD       = process.env.KREDO_PASSWORD;
+const HUBSPOT_ACCESS_TOKEN = process.env.HUBSPOT_ACCESS_TOKEN;
 
-const CONFIG = {
-  seriti: {
-    baseUrl: "https://seritiapi.findndrive.co.za",
-    apiKey: process.env.SERITI_API_KEY,
-    apiSecret: process.env.SERITI_API_SECRET,
-    dealershipId: process.env.SERITI_DEALERSHIP_ID,
-  },
-  kredo: {
-    baseUrl: "https://api.kredo.co.za",
-    username: process.env.KREDO_USERNAME,
-    password: process.env.KREDO_PASSWORD,
-  },
-  hubspot: {
-    accessToken: process.env.HUBSPOT_ACCESS_TOKEN,
-    baseUrl: "https://api.hubapi.com",
-    // ⚠️ Replace these with your actual HubSpot pipeline/stage IDs
-    // Find them: HubSpot → Settings → CRM → Deals → Pipelines
-    highIntent: {
-      pipeline: "default",
-      dealStage: "appointmentscheduled",
-    },
-    lowIntent: {
-      pipeline: "default",
-      dealStage: "qualifiedtobuy",
-    },
-  },
-  // FIX: removed ".." — file now saves alongside sync.js at repo root
-  processedIdsFile: path.join(__dirname, "processed-leads.json"),
-};
+const PROCESSED_FILE = "processed-leads.json";
+const SERITI_START_DATE = "2026-05-22"; // Fixed start date — fetch all leads from this date onwards
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function log(level, message, data = null) {
-  console.log(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-    ...(data && { data }),
-  }));
-}
-
-function generateGuid() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-  });
-}
-
-async function fetchJson(url, options = {}) {
-  const res = await fetch(url, options);
-  const body = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}: ${body.substring(0, 500)}`);
-  try { return JSON.parse(body); }
-  catch { throw new Error(`Non-JSON response from ${url}: ${body.substring(0, 200)}`); }
-}
-
-// ─── Processed IDs (local cache — guards against re-processing within a run) ──
-// Primary deduplication for high-intent is HubSpot id_number lookup.
-// Primary deduplication for low-intent is HubSpot name+phone lookup.
-// This local cache is a fast pre-filter to avoid redundant HubSpot API calls
-// for leads we definitely already processed in a previous run.
-
 function loadProcessedIds() {
   try {
-    if (fs.existsSync(CONFIG.processedIdsFile)) {
-      const data = JSON.parse(fs.readFileSync(CONFIG.processedIdsFile, "utf8"));
-      const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-      const pruned = Object.fromEntries(
-        Object.entries(data).filter(([, ts]) => ts > cutoff)
-      );
-      return new Set(Object.keys(pruned));
+    if (fs.existsSync(PROCESSED_FILE)) {
+      const raw = fs.readFileSync(PROCESSED_FILE, "utf8");
+      return new Set(JSON.parse(raw));
     }
-  } catch (err) {
-    log("warn", "Could not load processed IDs cache", { error: err.message });
+  } catch (e) {
+    console.warn("⚠️  Could not read processed-leads.json, starting fresh.", e.message);
   }
   return new Set();
 }
 
 function saveProcessedIds(ids) {
-  const now = Date.now();
-  const data = {};
-  for (const id of ids) data[id] = now;
-  fs.writeFileSync(CONFIG.processedIdsFile, JSON.stringify(data, null, 2));
+  fs.writeFileSync(PROCESSED_FILE, JSON.stringify([...ids]), "utf8");
 }
 
-// Stable cache key per lead type
-function highIntentCacheKey(lead) {
-  return `hi:${lead.idNumber}`;
-}
-function lowIntentCacheKey(lead) {
-  const name = `${(lead.firstName || "").toLowerCase().trim()}`;
-  const surname = `${(lead.lastName || "").toLowerCase().trim()}`;
-  const phone = `${(lead.mobileNumber || "").replace(/\D/g, "")}`;
-  return `lo:${name}:${surname}:${phone}`;
+function makeLeadId(lead) {
+  // Seriti has no explicit ID field — compose one from idNumber + date
+  return `${lead.idNumber}-${lead.date}`;
 }
 
-// ─── Seriti API ───────────────────────────────────────────────────────────────
+function todayISO() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
 
-async function getSeritiToken() {
-  log("info", "Authenticating with Seriti API...");
-  // ⚠️ Verify endpoint + body field names against your Swagger docs
-  const data = await fetchJson(`${CONFIG.seriti.baseUrl}/api/auth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      apiKey: CONFIG.seriti.apiKey,
-      apiSecret: CONFIG.seriti.apiSecret,
-    }),
+async function request(url, options = {}, body = null) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const reqOptions = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: options.method || "GET",
+      headers: options.headers || {},
+    };
+
+    const req = https.request(reqOptions, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode} from ${url}: ${data}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          resolve(data);
+        }
+      });
+    });
+
+    req.on("error", reject);
+    if (body) req.write(typeof body === "string" ? body : JSON.stringify(body));
+    req.end();
   });
-  const token = data.token || data.access_token || data.bearerToken;
-  if (!token) throw new Error("Seriti auth: no token — " + JSON.stringify(data));
-  log("info", "Seriti token obtained");
-  return token;
 }
 
-async function fetchLeads(token, intent) {
-  // ⚠️ Verify the low-intent endpoint path against your Swagger docs
-  const endpoint = intent === "high"
-    ? `${CONFIG.seriti.baseUrl}/api/leads/high-intent?dealershipId=${CONFIG.seriti.dealershipId}`
-    : `${CONFIG.seriti.baseUrl}/api/leads/low-intent?dealershipId=${CONFIG.seriti.dealershipId}`;
+// ─── Step 1: Fetch leads from Seriti ─────────────────────────────────────────
+async function fetchSeritiLeads() {
+  const endDate = todayISO();
+  console.log(`📡 Fetching leads from Seriti (${SERITI_START_DATE} → ${endDate})...`);
 
-  log("info", `Fetching ${intent}-intent leads from Seriti...`);
-  const data = await fetchJson(endpoint, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-  });
+  const credentials = Buffer.from(`${SERITI_API_KEY}:${SERITI_API_SECRET}`).toString("base64");
 
-  const leads = Array.isArray(data) ? data : data.leads || data.data || [];
-  log("info", `Fetched ${leads.length} ${intent}-intent leads`);
+  const leads = await request(
+    `https://api.findndrive.co.za/api/leads?dealershipId=${SERITI_DEALERSHIP_ID}&startDate=${SERITI_START_DATE}&endDate=${endDate}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  console.log(`✅ Seriti returned ${leads.length} lead(s).`);
   return leads;
 }
 
-// ─── Kredo API ────────────────────────────────────────────────────────────────
+// ─── Step 2: Submit to Kredo for credit check ─────────────────────────────────
+async function submitToKredo(lead) {
+  console.log(`  🔍 Submitting ${lead.firstName} ${lead.lastName} to Kredo...`);
 
-async function getKredoToken() {
-  log("info", "Authenticating with Kredo API...");
-  const data = await fetchJson(`${CONFIG.kredo.baseUrl}/private/client/user/auth`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: CONFIG.kredo.username, password: CONFIG.kredo.password }),
-  });
-  const token = data.token || data.access_token || data.bearerToken;
-  if (!token) throw new Error("Kredo auth: no token — " + JSON.stringify(data));
-  log("info", "Kredo token obtained");
-  return token;
-}
-
-function mapSeritiToKredo(lead) {
-  return {
-    client_guid: generateGuid(),
-    consumer: {
-      id_number:          lead.idNumber     || "",
-      first_name:         lead.firstName    || "",
-      last_name:          lead.lastName     || "",
-      work_number:        "",
-      cell_number:        lead.mobileNumber || "",
-      email_address:      "leads@findndrive.co.za",
-      gross_income:       String(lead.netIncome || "0"),
-      household_expenses: 0,
-      reason:             "Affordability Assessment",
-      home_number:        "",
-      consent:            true,
+  // Step 2a: Authenticate with Kredo
+  const authResponse = await request(
+    "https://api.kredo.co.za/v1/auth/login",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
     },
-  };
-}
-
-function extractPredictedApproval(kredoResponse) {
-  const candidates = [
-    kredoResponse?.PredictedApproval,
-    kredoResponse?.predictedApproval,
-    kredoResponse?.data?.PredictedApproval,
-    kredoResponse?.data?.predictedApproval,
-    kredoResponse?.report?.PredictedApproval,
-    kredoResponse?.CreditReport?.PredictedApproval,
-    kredoResponse?.creditReport?.PredictedApproval,
-    kredoResponse?.result?.PredictedApproval,
-  ];
-  for (const val of candidates) {
-    if (val !== undefined && val !== null && val !== "") return String(val);
-  }
-  log("warn", "PredictedApproval not found — check Kredo response structure", {
-    topLevelKeys: Object.keys(kredoResponse || {}),
-  });
-  return "Unknown";
-}
-
-async function postToKredo(token, kredoPayload) {
-  log("info", "Posting to Kredo credit-report-json...", { client_guid: kredoPayload.client_guid });
-  const data = await fetchJson(`${CONFIG.kredo.baseUrl}/credit-report-json`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(kredoPayload),
-  });
-  const predictedApproval = extractPredictedApproval(data);
-  log("info", "Kredo response received", { client_guid: kredoPayload.client_guid, predictedApproval });
-  return { raw: data, predictedApproval, client_guid: kredoPayload.client_guid };
-}
-
-// ─── HubSpot API ──────────────────────────────────────────────────────────────
-
-/**
- * For HIGH INTENT: search by custom property `seriti_id_number`.
- * Returns contactId if found, null if not.
- */
-async function findContactByIdNumber(idNumber) {
-  if (!idNumber) return null;
-  try {
-    const res = await fetchJson(`${CONFIG.hubspot.baseUrl}/crm/v3/objects/contacts/search`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${CONFIG.hubspot.accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        filterGroups: [{
-          filters: [{ propertyName: "seriti_id_number", operator: "EQ", value: idNumber }],
-        }],
-        properties: ["id"],
-        limit: 1,
-      }),
-    });
-    return res.results?.[0]?.id || null;
-  } catch (err) {
-    log("warn", "HubSpot id_number search failed", { error: err.message });
-    return null;
-  }
-}
-
-/**
- * For LOW INTENT: search by firstname + lastname + phone combination.
- * HubSpot doesn't support multi-field AND in one filter group for all field types,
- * so we search by phone first (most selective), then verify name client-side.
- * Returns contactId if a matching record exists, null if not.
- */
-async function findContactByNameAndPhone(firstName, lastName, mobileNumber) {
-  if (!mobileNumber) return null;
-  const phone = mobileNumber.replace(/\D/g, "");
-  try {
-    const res = await fetchJson(`${CONFIG.hubspot.baseUrl}/crm/v3/objects/contacts/search`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${CONFIG.hubspot.accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        filterGroups: [{
-          filters: [{ propertyName: "phone", operator: "EQ", value: mobileNumber }],
-        }],
-        properties: ["id", "firstname", "lastname", "phone"],
-        limit: 10,
-      }),
-    });
-
-    if (!res.results?.length) return null;
-
-    // Verify first + last name match client-side
-    const fn = (firstName || "").toLowerCase().trim();
-    const ln = (lastName || "").toLowerCase().trim();
-
-    const match = res.results.find((c) => {
-      const hsFn = (c.properties?.firstname || "").toLowerCase().trim();
-      const hsLn = (c.properties?.lastname || "").toLowerCase().trim();
-      return hsFn === fn && hsLn === ln;
-    });
-
-    return match?.id || null;
-  } catch (err) {
-    log("warn", "HubSpot name+phone search failed", { error: err.message });
-    return null;
-  }
-}
-
-/**
- * HIGH INTENT: create or update contact with 6 fields + intent tag.
- */
-async function upsertHighIntentContact(lead, kredoResult) {
-  log("info", "Upserting high-intent HubSpot contact...", { idNumber: lead.idNumber });
-
-  const existingId = await findContactByIdNumber(lead.idNumber);
-
-  const properties = {
-    firstname:               lead.firstName       || "",
-    lastname:                lead.lastName        || "",
-    phone:                   lead.mobileNumber    || "",
-    email:                   lead.email || `${lead.idNumber}@seriti-lead.local`,
-    // Custom properties
-    seriti_id_number:        lead.idNumber        || "",
-    seriti_estimated_amount: lead.estimatedAmount || "",
-    kredo_approval_chances:  kredoResult.predictedApproval,
-    lead_intent:             "High Intent",
-  };
-
-  if (existingId) {
-    await fetchJson(`${CONFIG.hubspot.baseUrl}/crm/v3/objects/contacts/${existingId}`, {
-      method: "PATCH",
-      headers: { Authorization: `Bearer ${CONFIG.hubspot.accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ properties }),
-    });
-    log("info", "High-intent contact updated", { contactId: existingId });
-    return { contactId: existingId, isNew: false };
-  }
-
-  const created = await fetchJson(`${CONFIG.hubspot.baseUrl}/crm/v3/objects/contacts`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CONFIG.hubspot.accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ properties }),
-  });
-  log("info", "High-intent contact created", { contactId: created.id });
-  return { contactId: created.id, isNew: true };
-}
-
-/**
- * LOW INTENT: only create — never update — if name+phone combo is new.
- * Returns null if duplicate detected in HubSpot (skip this lead).
- */
-async function createLowIntentContact(lead) {
-  log("info", "Checking for low-intent duplicate in HubSpot...", {
-    name: `${lead.firstName} ${lead.lastName}`,
-  });
-
-  const existingId = await findContactByNameAndPhone(
-    lead.firstName,
-    lead.lastName,
-    lead.mobileNumber
+    {
+      username: KREDO_USERNAME,
+      password: KREDO_PASSWORD,
+    }
   );
 
-  if (existingId) {
-    log("info", "Low-intent duplicate found in HubSpot — skipping", { contactId: existingId });
+  const kredoToken = authResponse.token || authResponse.access_token;
+  if (!kredoToken) throw new Error("Kredo auth failed — no token returned.");
+
+  // Step 2b: Submit credit check
+  const kredoResult = await request(
+    "https://api.kredo.co.za/v1/credit-check",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${kredoToken}`,
+        "Content-Type": "application/json",
+      },
+    },
+    {
+      id_number:  lead.idNumber,
+      first_name: lead.firstName,
+      last_name:  lead.lastName,
+      mobile:     lead.mobileNumber,
+      net_income: lead.netIncome,
+    }
+  );
+
+  console.log(`  ✅ Kredo result: score=${kredoResult.score ?? "N/A"}, status=${kredoResult.status ?? "N/A"}`);
+  return kredoResult;
+}
+
+// ─── Step 3: Create contact in HubSpot ───────────────────────────────────────
+async function createHubSpotContact(lead, kredoResult) {
+  console.log(`  📬 Creating HubSpot contact for ${lead.firstName} ${lead.lastName}...`);
+
+  // Check if contact already exists by phone (Seriti returns no email)
+  const searchResult = await request(
+    "https://api.hubapi.com/crm/v3/objects/contacts/search",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HUBSPOT_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    },
+    {
+      filterGroups: [
+        {
+          filters: [
+            {
+              propertyName: "phone",
+              operator: "EQ",
+              value: lead.mobileNumber,
+            },
+          ],
+        },
+      ],
+      properties: ["id", "phone", "firstname", "lastname"],
+      limit: 1,
+    }
+  );
+
+  if (searchResult.total > 0) {
+    console.log(`  ⏭️  Contact already exists in HubSpot (phone: ${lead.mobileNumber}), skipping.`);
     return null;
   }
 
-  const properties = {
-    firstname:         lead.firstName    || "",
-    lastname:          lead.lastName     || "",
-    phone:             lead.mobileNumber || "",
-    email:             lead.email || `lo.${(lead.mobileNumber || "unknown").replace(/\D/g, "")}@seriti-lead.local`,
-    // Custom properties
-    seriti_net_income: String(lead.netIncome || ""),
-    lead_intent:       "Low Intent",
-  };
+  const contact = await request(
+    "https://api.hubapi.com/crm/v3/objects/contacts",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HUBSPOT_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    },
+    {
+      properties: {
+        firstname:                lead.firstName,
+        lastname:                 lead.lastName,
+        phone:                    lead.mobileNumber,
+        // Seriti fields — create these as custom contact properties in HubSpot
+        seriti_dealer_name:       lead.dealerName,
+        seriti_dealer_code:       lead.dealerCode,
+        seriti_lead_date:         lead.date,
+        seriti_approval_chance:   lead.approvalChance,
+        seriti_estimated_amount:  lead.estimatedAmount,
+        seriti_instalment_budget: lead.instalmentBudget,
+        seriti_insurance_budget:  lead.insuranceBudget,
+        seriti_contact_ability:   lead.contactAbility,
+        seriti_id_number:         lead.idNumber,
+        seriti_net_income:        lead.netIncome,
+        // Kredo fields — create these as custom contact properties in HubSpot
+        kredo_credit_score:       String(kredoResult?.score ?? ""),
+        kredo_credit_status:      String(kredoResult?.status ?? ""),
+        kredo_affordability:      String(kredoResult?.affordability ?? ""),
+      },
+    }
+  );
 
-  const created = await fetchJson(`${CONFIG.hubspot.baseUrl}/crm/v3/objects/contacts`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CONFIG.hubspot.accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ properties }),
-  });
-  log("info", "Low-intent contact created", { contactId: created.id });
-  return created.id;
-}
-
-/**
- * Create a deal and associate it with the contact.
- */
-async function createDeal(lead, contactId, intent, kredoResult = null) {
-  const cfg = intent === "high" ? CONFIG.hubspot.highIntent : CONFIG.hubspot.lowIntent;
-  const label = intent === "high" ? "High Intent" : "Low Intent";
-
-  const dealProperties = {
-    dealname:    `${lead.firstName || ""} ${lead.lastName || ""} — ${label} Lead`.trim(),
-    pipeline:    cfg.pipeline,
-    dealstage:   cfg.dealStage,
-    amount:      String(lead.estimatedAmount || lead.netIncome || ""),
-    lead_intent: label,
-    ...(kredoResult && { kredo_approval_chances: kredoResult.predictedApproval }),
-  };
-
-  const deal = await fetchJson(`${CONFIG.hubspot.baseUrl}/crm/v3/objects/deals`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${CONFIG.hubspot.accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      properties: dealProperties,
-      associations: [{
-        to: { id: contactId },
-        types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 3 }],
-      }],
-    }),
-  });
-
-  log("info", `${label} deal created`, { dealId: deal.id, contactId });
-  return deal.id;
+  console.log(`  ✅ HubSpot contact created: ID ${contact.id}`);
+  return contact;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
-
 async function main() {
-  log("info", "=== Lead sync starting ===");
+  console.log("🚀 Lead sync starting...\n");
 
-  const required = [
-    "SERITI_API_KEY", "SERITI_API_SECRET", "SERITI_DEALERSHIP_ID",
-    "KREDO_USERNAME", "KREDO_PASSWORD", "HUBSPOT_ACCESS_TOKEN",
-  ];
-  const missing = required.filter((k) => !process.env[k]);
-  if (missing.length > 0) throw new Error(`Missing env vars: ${missing.join(", ")}`);
+  // Validate env vars
+  const required = {
+    SERITI_API_KEY,
+    SERITI_API_SECRET,
+    SERITI_DEALERSHIP_ID,
+    KREDO_USERNAME,
+    KREDO_PASSWORD,
+    HUBSPOT_ACCESS_TOKEN,
+  };
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length) {
+    console.error(`❌ Missing environment variables: ${missing.join(", ")}`);
+    process.exit(1);
+  }
 
   const processedIds = loadProcessedIds();
-  log("info", `Loaded ${processedIds.size} cached processed IDs`);
+  const leads = await fetchSeritiLeads();
 
-  // Auth Seriti first; only fetch Kredo token if there are high-intent leads to process
-  const seritiToken = await getSeritiToken();
+  let newCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
 
-  // Fetch both lead types in parallel
-  const [highLeads, lowLeads] = await Promise.all([
-    fetchLeads(seritiToken, "high"),
-    fetchLeads(seritiToken, "low"),
-  ]);
+  for (const lead of leads) {
+    const leadId = makeLeadId(lead);
 
-  // Only auth Kredo if there are unprocessed high-intent leads
-  const unprocessedHigh = highLeads.filter(
-    (lead) => !processedIds.has(highIntentCacheKey(lead))
-  );
-
-  let kredoToken = null;
-  if (unprocessedHigh.length > 0) {
-    kredoToken = await getKredoToken();
-  } else {
-    log("info", "No unprocessed high-intent leads — skipping Kredo auth");
-  }
-
-  let successHigh = 0, successLow = 0, errorCount = 0;
-
-  // ── HIGH INTENT ─────────────────────────────────────────────────────────────
-  log("info", "--- Processing high-intent leads ---");
-
-  for (const lead of highLeads) {
-    const cacheKey = highIntentCacheKey(lead);
-
-    if (processedIds.has(cacheKey)) {
-      log("info", `Skipping cached high-intent lead: ${lead.idNumber}`);
+    if (processedIds.has(leadId)) {
+      skippedCount++;
       continue;
     }
 
-    try {
-      const kredoPayload = mapSeritiToKredo(lead);
-      const kredoResult  = await postToKredo(kredoToken, kredoPayload);
-
-      const { contactId, isNew } = await upsertHighIntentContact(lead, kredoResult);
-
-      if (isNew) await createDeal(lead, contactId, "high", kredoResult);
-
-      processedIds.add(cacheKey);
-      successHigh++;
-      log("info", `✓ High-intent lead processed: ${lead.idNumber}`);
-    } catch (err) {
-      errorCount++;
-      log("error", `✗ High-intent lead failed: ${lead.idNumber}`, { error: err.message });
-    }
-  }
-
-  // ── LOW INTENT ──────────────────────────────────────────────────────────────
-  log("info", "--- Processing low-intent leads ---");
-
-  for (const lead of lowLeads) {
-    const cacheKey = lowIntentCacheKey(lead);
-
-    if (processedIds.has(cacheKey)) {
-      log("info", `Skipping cached low-intent lead: ${lead.firstName} ${lead.lastName}`);
-      continue;
-    }
+    console.log(`\n👤 Processing: ${lead.firstName} ${lead.lastName} (${leadId})`);
 
     try {
-      const contactId = await createLowIntentContact(lead);
-
-      if (contactId) {
-        await createDeal(lead, contactId, "low");
-        successLow++;
-        log("info", `✓ Low-intent lead processed: ${lead.firstName} ${lead.lastName}`);
-      }
-
-      // Cache regardless — duplicate or not, no need to hit HubSpot again next run
-      processedIds.add(cacheKey);
+      const kredoResult = await submitToKredo(lead);
+      await createHubSpotContact(lead, kredoResult);
+      processedIds.add(leadId);
+      newCount++;
     } catch (err) {
+      console.error(`  ❌ Failed for ${leadId}:`, err.message);
       errorCount++;
-      log("error", `✗ Low-intent lead failed: ${lead.firstName} ${lead.lastName}`, { error: err.message });
+      // Don't add to processedIds so it retries next run
     }
   }
 
   saveProcessedIds(processedIds);
 
-  log("info", `=== Sync complete: ${successHigh} high-intent, ${successLow} low-intent, ${errorCount} errors ===`);
-  if (errorCount > 0) process.exit(1);
+  console.log(`\n📊 Done. New: ${newCount} | Skipped: ${skippedCount} | Errors: ${errorCount}`);
 }
 
 main().catch((err) => {
-  log("error", "Fatal error", { error: err.message, stack: err.stack });
+  console.error("💥 Fatal error:", err);
   process.exit(1);
 });
