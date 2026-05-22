@@ -1,4 +1,5 @@
 import fs from "fs";
+import crypto from "crypto";
 import https from "https";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -117,12 +118,15 @@ async function fetchSeritiLeads(intent, token) {
 async function submitToKredo(lead) {
   console.log(`  🔍 Submitting ${lead.firstName} ${lead.lastName} to Kredo...`);
 
-  // Step 1: Authenticate — token is inherited by subsequent requests server-side
+  // Step 1: Authenticate with x-api-key header
   const authResponse = await request(
     "https://api.kredo.co.za/private/client/user/auth",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": KREDO_X_API_KEY,
+      },
     },
     {
       username: KREDO_USERNAME,
@@ -130,34 +134,39 @@ async function submitToKredo(lead) {
     }
   );
 
-  const kredoToken = authResponse.authorizationToken || authResponse.token || authResponse.access_token || authResponse.accessToken;
+  const kredoToken = authResponse.authorizationToken || authResponse.token || authResponse.access_token;
   if (!kredoToken) throw new Error(`Kredo auth failed — response: ${JSON.stringify(authResponse)}`);
 
-  // Step 2: Credit report — try all auth header combinations
-  console.log(`  🔑 Kredo token: ${kredoToken}`);
-  console.log(`  🔑 Kredo x-api-key: ${KREDO_X_API_KEY}`);
+  // Step 2: Credit report with correct headers and body structure
   const kredoResult = await request(
     "https://api.kredo.co.za/credit-report-json",
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${kredoToken}`,
         "x-api-key": KREDO_X_API_KEY,
         "authorizationToken": kredoToken,
-        "X-Authorization": kredoToken,
       },
     },
     {
-      id_number:  lead.idNumber,
-      first_name: lead.firstName,
-      last_name:  lead.lastName,
-      mobile:     lead.mobileNumber,
-      net_income: lead.netIncome,
+      client_guid: crypto.randomUUID(),
+      consumer: {
+        id_number:           lead.idNumber,
+        first_name:          lead.firstName,
+        last_name:           lead.lastName,
+        cell_number:         lead.mobileNumber,
+        work_number:         "",
+        home_number:         "",
+        email_address:       "",
+        gross_income:        Number(lead.netIncome) || 0,
+        household_expenses:  0,
+        reason:              "Affordability Assessment",
+        consent:             true,
+      },
     }
   );
 
-  console.log(`  ✅ Kredo result: score=${kredoResult.score ?? "N/A"}, status=${kredoResult.status ?? "N/A"}`);
+  console.log(`  ✅ Kredo result: successful=${kredoResult.data?.successful ?? "N/A"}`);
   return kredoResult;
 }
 
@@ -215,9 +224,9 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
   };
 
   if (kredoResult) {
-    properties.kredo_credit_score  = String(kredoResult?.score ?? "");
-    properties.kredo_credit_status = String(kredoResult?.status ?? "");
-    properties.kredo_affordability = String(kredoResult?.affordability ?? "");
+    properties.kredo_successful     = String(kredoResult?.data?.successful ?? "");
+    properties.kredo_transaction_id = String(kredoResult?.data?.transaction_id ?? "");
+    properties.kredo_reference      = String(kredoResult?.data?.reference ?? "");
   }
 
   const contact = await request(
