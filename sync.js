@@ -133,15 +133,19 @@ async function submitToKredo(lead) {
   const kredoToken = authResponse.authorizationToken || authResponse.token || authResponse.access_token || authResponse.accessToken;
   if (!kredoToken) throw new Error(`Kredo auth failed — response: ${JSON.stringify(authResponse)}`);
 
-  // Step 2: Credit report — pass token explicitly in Authorization header
+  // Step 2: Credit report — try all auth header combinations
+  console.log(`  🔑 Kredo token: ${kredoToken}`);
+  console.log(`  🔑 Kredo x-api-key: ${KREDO_X_API_KEY}`);
   const kredoResult = await request(
     "https://api.kredo.co.za/credit-report-json",
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Authorization": `Bearer ${kredoToken}`,
         "x-api-key": KREDO_X_API_KEY,
         "authorizationToken": kredoToken,
+        "X-Authorization": kredoToken,
       },
     },
     {
