@@ -210,34 +210,34 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
         {
           filters: [
             {
-              propertyName: "phone",
+              propertyName: "mobilephone",
               operator: "EQ",
               value: lead.mobileNumber,
             },
           ],
         },
       ],
-      properties: ["id", "phone", "firstname", "lastname"],
+      properties: ["id", "mobilephone", "firstname", "lastname"],
       limit: 1,
     }
   );
 
   if (searchResult.total > 0) {
-    console.log(`  ⏭️  Contact already exists in HubSpot (phone: ${lead.mobileNumber}), skipping.`);
+    console.log(`  ⏭️  Contact already exists in HubSpot (mobile: ${lead.mobileNumber}), skipping.`);
     return null;
   }
 
   const properties = {
-    firstname:                  lead.firstName,
-    lastname:                   lead.lastName,
-    phone:                      lead.mobileNumber,
-    seriti_dealer_name:         lead.dealerName,
-    seriti_dealer_code:         lead.dealerCode,
-    seriti_lead_date:           lead.date,
-    seriti_first_name:          lead.firstName,
-    seriti_last_name:           lead.lastName,
-    seriti_mobile_number:       lead.mobileNumber,
-    estimated_finance:          lead.estimatedAmount,
+    firstname:              lead.firstName,
+    lastname:               lead.lastName,
+    mobilephone:            lead.mobileNumber,
+    seriti_dealer_name:     lead.dealerName,
+    seriti_dealer_code:     lead.dealerCode,
+    seriti_lead_date:       lead.date,
+    seriti_first_name:      lead.firstName,
+    seriti_last_name:       lead.lastName,
+    seriti_mobile_number:   lead.mobileNumber,
+    estimated_finance:      lead.estimatedAmount,
   };
 
   if (kredoResult) {
