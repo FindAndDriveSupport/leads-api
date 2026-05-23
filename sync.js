@@ -187,7 +187,7 @@ async function submitToKredo(lead) {
     }
   );
 
-  console.log(`  ✅ Kredo vehicle_asset_finance: ${JSON.stringify(kredoResult?.data?.report?.predictor?.vehicle_asset_finance)}`);
+  console.log(`  ✅ Kredo full data keys: ${JSON.stringify(Object.keys(kredoResult?.data ?? {}))}`);
   return kredoResult;
 }
 
