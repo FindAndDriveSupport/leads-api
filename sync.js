@@ -228,26 +228,20 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
   }
 
   const properties = {
-    firstname:                lead.firstName,
-    lastname:                 lead.lastName,
-    phone:                    lead.mobileNumber,
-    seriti_dealer_name:       lead.dealerName,
-    seriti_dealer_code:       lead.dealerCode,
-    seriti_lead_date:         lead.date,
-    seriti_approval_chance:   lead.approvalChance,
-    seriti_estimated_amount:  lead.estimatedAmount,
-    seriti_instalment_budget: lead.instalmentBudget,
-    seriti_insurance_budget:  lead.insuranceBudget,
-    seriti_contact_ability:   lead.contactAbility,
-    seriti_id_number:         lead.idNumber,
-    seriti_net_income:        lead.netIncome,
-    seriti_intent:            intent,
+    firstname:                  lead.firstName,
+    lastname:                   lead.lastName,
+    phone:                      lead.mobileNumber,
+    seriti_dealer_name:         lead.dealerName,
+    seriti_dealer_code:         lead.dealerCode,
+    seriti_lead_date:           lead.date,
+    seriti_first_name:          lead.firstName,
+    seriti_last_name:           lead.lastName,
+    seriti_mobile_number:       lead.mobileNumber,
+    estimated_finance:          lead.estimatedAmount,
   };
 
   if (kredoResult) {
-    properties.kredo_successful     = String(kredoResult?.data?.successful ?? "");
-    properties.kredo_transaction_id = String(kredoResult?.data?.transaction_id ?? "");
-    properties.kredo_reference      = String(kredoResult?.data?.reference ?? "");
+    properties.kredo_predicted_approval = String(kredoResult?.data?.successful ?? "");
   }
 
   const contact = await request(
