@@ -187,7 +187,7 @@ async function submitToKredo(lead) {
     }
   );
 
-  console.log(`  ✅ Kredo result: successful=${kredoResult.data?.successful ?? "N/A"}`);
+  console.log(`  ✅ Kredo vehicle_asset_finance: ${JSON.stringify(kredoResult?.data?.vehicle_asset_finance)}`);
   return kredoResult;
 }
 
