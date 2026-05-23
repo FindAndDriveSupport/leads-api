@@ -136,6 +136,8 @@ async function submitToKredo(lead) {
 
   const kredoToken = authResponse.authorizationToken || authResponse.token || authResponse.access_token;
   if (!kredoToken) throw new Error(`Kredo auth failed — response: ${JSON.stringify(authResponse)}`);
+  console.log(`  🔑 Auth response: ${JSON.stringify(authResponse)}`);
+  console.log(`  🔑 Using token: ${kredoToken}`);
 
   // Step 2: Credit report with correct headers and body structure
   const kredoResult = await request(
