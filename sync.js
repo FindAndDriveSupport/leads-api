@@ -140,6 +140,25 @@ async function submitToKredo(lead) {
   console.log(`  🔑 Using token: ${kredoToken}`);
 
   // Step 2: Credit report with correct headers and body structure
+  console.log(`  🔑 x-api-key: ${KREDO_X_API_KEY}`);
+  const creditBody = {
+    client_guid: crypto.randomUUID(),
+    consumer: {
+      id_number:          lead.idNumber,
+      first_name:         lead.firstName,
+      last_name:          lead.lastName,
+      cell_number:        lead.mobileNumber,
+      work_number:        "",
+      home_number:        "",
+      email_address:      "",
+      gross_income:       Number(lead.netIncome) || 0,
+      household_expenses: 0,
+      reason:             "Affordability Assessment",
+      consent:            true,
+    },
+  };
+  console.log(`  📦 Credit body: ${JSON.stringify(creditBody)}`);
+
   const kredoResult = await request(
     "https://api.kredo.co.za/credit-report-json",
     {
