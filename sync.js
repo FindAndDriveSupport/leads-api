@@ -237,6 +237,7 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
     seriti_first_name:      lead.firstName,
     seriti_last_name:       lead.lastName,
     seriti_mobile_number:   lead.mobileNumber,
+    seriti_id_number:       lead.idNumber,
     estimated_finance:      lead.estimatedAmount,
   };
 
