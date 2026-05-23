@@ -187,7 +187,7 @@ async function submitToKredo(lead) {
     }
   );
 
-  console.log(`  ✅ Kredo vehicle_asset_finance: ${JSON.stringify(kredoResult?.data?.vehicle_asset_finance)}`);
+  console.log(`  ✅ Kredo vehicle_asset_finance: ${JSON.stringify(kredoResult?.data?.report?.predictor?.vehicle_asset_finance)}`);
   return kredoResult;
 }
 
@@ -239,7 +239,7 @@ async function createHubSpotContact(lead, intent, kredoResult = null) {
   };
 
   if (kredoResult) {
-    properties.kredo_predicted_approval = String(kredoResult?.data?.vehicle_asset_finance?.PredictedApproval ?? "");
+    properties.kredo_predicted_approval = String(kredoResult?.data?.report?.predictor?.vehicle_asset_finance?.PredictedApproval ?? "");
   }
 
   const contact = await request(
