@@ -8,9 +8,9 @@ crons = ["*/5 * * * *"]
 
 [[kv_namespaces]]
 binding = "LEADS_SYNC_CONFIG"
-id = "REPLACE_WITH_CONFIG_KV_ID"
+id = "352dc4a8e9244b88b315a12590fd6a1a"
 
 [[kv_namespaces]]
 binding = "LEADS_SYNC_CACHE"
-id = "REPLACE_WITH_CACHE_KV_ID"
+id = "5bdb23b812e54e0fbd9b70dfa25cd5db"
 
