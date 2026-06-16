@@ -1,0 +1,16 @@
+name = "leads-api"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "LEADS_SYNC_CONFIG"
+id = "REPLACE_WITH_CONFIG_KV_ID"
+
+[[kv_namespaces]]
+binding = "LEADS_SYNC_CACHE"
+id = "REPLACE_WITH_CACHE_KV_ID"
+
