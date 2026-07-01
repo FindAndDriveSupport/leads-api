@@ -134,6 +134,9 @@ async function processLeads(leads, intent, dealerKey, env, runKredo, opts) {
     } catch (err) {
       console.error(`  ❌ Failed for ${cacheKey}:`, err.message);
       errorCount++;
+      // Cache failed leads with 1-day TTL to prevent infinite retry loops
+      // on non-retryable errors (e.g. missing HubSpot properties)
+      await env.LEADS_SYNC_CACHE.put(cacheKey, "error", { expirationTtl: 86400 });
     }
   }
 
@@ -255,16 +258,15 @@ async function createHubSpotContact(lead, intent, approvalChance, hubspotToken) 
     firstname:          lead.firstName,
     lastname:           lead.lastName,
     mobilephone:        lead.mobileNumber,
-    lead_intent:        intent === "highIntent" ? "High Intent" : "Low Intent",
     seriti_dealer_name: lead.dealerName,
     seriti_dealer_code: lead.dealerCode,
     seriti_lead_date:   lead.date,
   };
 
   if (intent === "highIntent") {
-    properties.seriti_id_number          = lead.idNumber ?? "";
-    properties.estimated_finance         = lead.estimatedAmount ?? "";
-    properties.kredo_predicted_approval  = approvalChance;
+    properties.seriti_id_number         = lead.idNumber ?? "";
+    properties.estimated_finance        = lead.estimatedAmount ?? "";
+    properties.kredo_predicted_approval = approvalChance;
   } else {
     properties.seriti_net_income = lead.netIncome ?? "";
   }
